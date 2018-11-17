@@ -1,0 +1,11 @@
+gym==0.10.5
+h5py==2.8.0
+Keras==2.2.0
+matplotlib==2.2.2
+networkx==2.1
+numpy==1.14.3
+pathlib==1.0.1
+pandas==0.23.0
+pillow==5.1.0
+scikit-learn==0.20.0
+tensorflow==1.10.0
