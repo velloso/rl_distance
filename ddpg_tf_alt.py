@@ -2,6 +2,7 @@ import random
 import sys
 from collections import deque
 import time
+import gc
 
 import math
 import numpy as np
@@ -11,13 +12,13 @@ from sklearn.preprocessing import OneHotEncoder
 
 from permutation_sorting import PermutationSorting
 from state_transformers import OneHotStateTransformer
-from util import plot_running_avg, plot, ensure_saved_models_dir, v_upperbound_breakpoints, \
+from util import plot_running_avg, plot, ensure_saved_models_dir, v_upperbound_breakpoints, breakpoints, \
 	OrnsteinUhlenbeckActionNoise
 
 class DDPGAgent:
 	def __init__(self, env, state_transformer, layer_actor, layer_critic, actor_learning_rate=0.0001,
-				 critic_learning_rate=0.001, train_start=1000, maxlen=1e5, fill_mem=False,
-				 batch_size=64, discount_factor=0.99, tau=0.001, neighbors_percent=0.01, render=False,
+				 critic_learning_rate=0.001, train_start=1000, maxlen=1e5, batch_size=64,
+				 discount_factor=0.99, tau=0.001, neighbors_percent=0.01, render=False,
 				 pretrain_path='./saved_models/ddpg_tf_pretrain_weights_100.h5',
 				 train_path='./saved_models/ddpg_tf_pretrain_weights_100.h5'):
 		self.env = env
@@ -29,7 +30,7 @@ class DDPGAgent:
 		self.n_neighbors = math.ceil(neighbors_percent*self.action_size)
 		self.neighbors = NearestNeighbors(n_neighbors=self.n_neighbors)
 		self.neighbors.fit(self.enc_actions)
-		#self.actor_noise = OrnsteinUhlenbeckActionNoise(mu=np.zeros(self.action_size))
+		self.actor_noise = OrnsteinUhlenbeckActionNoise(mu=np.zeros(self.actor_output))
 
 		self.state_size = state_transformer.dimensions
 		self.discount_factor = discount_factor
@@ -37,7 +38,6 @@ class DDPGAgent:
 		self.train_start = train_start
 		self.pretrain_path = pretrain_path
 		self.train_path = train_path
-		self.fill_mem = fill_mem
 
 		# create replay memory using deque
 		self.maxlen = int(maxlen)
@@ -133,7 +133,7 @@ class DDPGAgent:
 
 	# Updates the actor weights
 	def actor_train_model(self, state):
-		self.session.run([self.actor_loss, self.train_actor], feed_dict={
+		return self.session.run([self.actor_loss, self.train_actor], feed_dict={
 			self.state: state
 		})
 
@@ -168,6 +168,7 @@ class DDPGAgent:
 		result = self.critic_get_q_value(
 			np.repeat(state, self.n_neighbors, axis=0), actions.reshape(-1, self.actor_output), target=True)
 		result = result.reshape(self.batch_size, self.n_neighbors, -1)
+
 		return np.amax(result, axis=1)
 
 	# Predict action based on state
@@ -187,7 +188,7 @@ class DDPGAgent:
 	# Applies the Wolpertinger Policy
 	def get_action(self, state):
 		# First gets an approximation action from the Actor network
-		apx_action = self.actor_get_action(state)# + self.actor_noise()
+		apx_action = self.actor_get_action(state) + self.actor_noise()
 
 		# Then gets the k nearest action of the approximated values
 		act_neighbors_idx = self.neighbors.kneighbors(apx_action, return_distance=False)
@@ -202,7 +203,7 @@ class DDPGAgent:
 	# Applies the Wolpertinger Policy to the target network
 	def get_target_action(self, state):
 		# First gets an approximation action from the Actor network
-		apx_action = self.actor_get_action(state, target=True)# + self.actor_noise()
+		apx_action = self.actor_get_action(state, target=True) + self.actor_noise()
 
 		# Then gets the k nearest action of the approximated values
 		act_neighbors_idx = self.neighbors.kneighbors(apx_action, return_distance=False)
@@ -215,7 +216,7 @@ class DDPGAgent:
 
 	def train_model(self):
 		if len(self.memory) < self.train_start:
-			return
+			return 0
 		# Sample a random minibatch from the replay buffer
 		batch_size = min(self.batch_size, len(self.memory))
 		mini_batch = random.sample(self.memory, batch_size)
@@ -240,7 +241,7 @@ class DDPGAgent:
 				yi[i] = reward[i]
 			else:
 				yi[i] = reward[i] + self.discount_factor * target_action[i]
-		self.critic_train_model(state, action, np.array(yi))
+		loss = self.critic_train_model(state, action, np.array(yi))
 
 		# Update Actor network
 		self.actor_train_model(state)
@@ -248,16 +249,17 @@ class DDPGAgent:
 		# Updates target networks
 		self.update_target_model()
 
+		return loss[0]
+
 	def run_episode(self, max_steps, forced=None, update_model=True):
 		if self.render:
 			self.env.render()
 		done = False
-		score = 0
-		steps = 0
+		score, steps, loss = 0, 0, 0
 		state = self.env.reset(forced=forced)
 
 		if self._is_identity(state):
-			return 0, steps
+			return 0, 0, 0
 
 		state = self.state_transformer.transform(state)
 		rem_steps = max_steps
@@ -269,10 +271,7 @@ class DDPGAgent:
 			steps += 1
 
 			# get action for the current state and go one step in environment
-			if len(self.memory) < self.train_start:
-				action_idx = random.randrange(self.action_size)
-			else:
-				action_idx = self.get_action(state)
+			action_idx = self.get_action(state)
 			next_state, reward, done, info = self.env.step(action_idx)
 			next_state = self.state_transformer.transform(next_state)
 
@@ -280,53 +279,50 @@ class DDPGAgent:
 				# save the sample <s, a, r, s'> to the replay memory
 				self.append_sample(state, self.enc_actions[action_idx].todense(), reward, next_state, done)
 				# every time step do the training
-				self.train_model()
+				loss += self.train_model()
 
 			score += reward
 			state = next_state
 
-		return score, steps
+		loss = loss / steps
+		return score, steps, loss
 
-	def train(self, episodes=1000, max_steps=800, plot_rewards=True):
+	def train(self, episodes=1000, max_steps=1000, plot_rewards=True):
 		# Initialize target network weights
 		scores, steps = np.empty(episodes), np.empty(episodes)
 		start = time.time()
 		break_flag = 0
-		step = max_steps
 		for e in range(episodes):
-			if e%100 == 0 and step==max_steps and self.fill_mem:
-				self.fill_memory()
-			score, step = self.run_episode(max_steps)
+			score, step, loss = self.run_episode(max_steps)
 			scores[e], steps[e] = score, step
-			print("Episode:", e, "  steps:", step, "  score:", score, "  time:", time.time() - start)
-			break_flag = break_flag+1 if step == max_steps else 0
-			if break_flag > 50 and e >= episodes/2: break
-		ensure_saved_models_dir()
+			print("Episode:", e, "  steps:", step, "  score:", score, "  loss:", loss, "  time:", time.time() - start)
+			#break_flag = break_flag+1 if step == max_steps else 0
+			#if break_flag > 60: break
 		saver = tf.train.Saver()
 		saver.save(self.session, self.train_path)
 
 		if plot_rewards:
 			t_time = time.time() - start
 			print("Mean step:", np.mean(steps), " Total steps:", np.sum(steps), " total time:", t_time)
-			np.save("./train_data/ddpg_enc_actions" + str(self.state_size) + str(self.n_neighbors) + "_scores", scores)
-			np.save("./train_data/ddpg_enc_actions" + str(self.state_size) + str(self.n_neighbors) + "_time", t_time)
-			np.save("./train_data/ddpg_enc_actions" + str(self.state_size) + str(self.n_neighbors) + "_steps", steps)
+			np.save("./train_data/ddpg_enc_actions" + str(self.state_size) + '_' + str(self.n_neighbors) + "_scores", scores)
+			np.save("./train_data/ddpg_enc_actions" + str(self.state_size) + '_' + str(self.n_neighbors) + "_time", t_time)
+			np.save("./train_data/ddpg_enc_actions" + str(self.state_size) + '_' + str(self.n_neighbors) + "_steps", steps)
 			plot(steps)
 			plot_running_avg(steps)
 
 	def solve(self, permutation, its=100, max_steps=100, update_model=False):
 		ans = None
 		for _ in range(its):
-			pans = self.run_episode(max_steps=max_steps, forced=permutation, update_model=update_model)
+			pans, _, _ = self.run_episode(max_steps=max_steps, forced=permutation, update_model=update_model)
 			if ans is None or pans > ans:
 				ans = pans
 		return -ans
 
 	def fill_target(self, state, target):
 		for idx, (_, i, j, k) in enumerate(self.env.actions):
-			target[idx] = v_upperbound_breakpoints(state, i, j, k, self.discount_factor)
+			target[idx] = v_upperbound_breakpoints(state, i, j, k)
 
-	def fill_memory(self, steps_total=None):
+	def fill_memory(self, steps_total=None, max_steps=800, epsilon=0.7):
 		print("Filling queue memory with greedy actions.")
 		s, e = 0, 0
 		if steps_total is None:
@@ -338,9 +334,9 @@ class DDPGAgent:
 			while self._is_identity(p):
 				p = self.env.reset()
 			state = self.state_transformer.transform(p)
-			while not done and step < 1000:
+			while not done and step < max_steps:
 				# get greedy action or random based on epsilon
-				if np.random.rand() <= 0.7:
+				if np.random.rand() <= epsilon:
 					action = random.randrange(self.action_size)
 				else:
 					targets = np.empty(self.action_size)
@@ -357,29 +353,105 @@ class DDPGAgent:
 				s += 1
 			e += 1
 
+	def serial_pretrain(self, rows=300000, batch_size=32, act_size=100, epochs=3):
+		start = time.time()
+		r = int(rows / batch_size)
+		for j in range(r):
+			states = np.empty((batch_size, self.state_size))
+			actions = np.random.randint(self.action_size, size=(batch_size, act_size))
+			targets = np.empty((batch_size, act_size))
+			for i in range(batch_size):
+				p = self.env.observation_space.sample()
+				states[i] = self.state_transformer.transform(p)
+				for k in range(act_size):
+					_, ia, ja, ka = self.env.actions[actions[i][k]]
+					targets[i][k] = v_upperbound_breakpoints(p, ia, ja, ka)
+				if i % 100 == 0:
+					print(j, "-- %.6f %%" % ((j*batch_size + i)/rows * 100), time.time() - start)
+			print(j, "-- %.6f %%" % ((j * batch_size + i) / rows * 100), time.time() - start, "-- UPDATE")
+			for i in range(epochs):
+				self.critic_train_model(np.repeat(states, act_size, axis=0),
+										self.enc_actions[actions.reshape(-1,)].todense(),
+										targets.reshape(-1,1))
+				self.actor_train_model(states)
+			targets, states, actions = None, None, None
+			gc.collect()
+			if j % 100000 == 0:
+				ensure_saved_models_dir()
+				saver = tf.train.Saver()
+				saver.save(self.session, self.pretrain_path)
+				print("Pretrain weights saved")
+		ensure_saved_models_dir()
+		saver = tf.train.Saver()
+		saver.save(self.session, self.pretrain_path)
+		print("Pretrain weights saved")
+		self.session.run(self.target_init)
+
+	def load_pretrain_weights(self):
+		saver = tf.train.Saver()
+		saver.restore(self.session, self.pretrain_path)
+		self.session.run(self.target_init)
+
+	def load_weights(self):
+		saver = tf.train.Saver()
+		saver.restore(self.session, self.train_path)
+		self.session.run(self.target_init)
+
 def main(argv):
 	np.random.seed(12345678)
 	n = int(argv[1])
-	n_neighbors = 0.3
-	pretrain = './saved_models/ddpg_tf_pretrain_weights_' + str(n) + str(n_neighbors) + '.h5'
-	train = './saved_models/ddpg_tf_final_weights_' + str(n) + str(n_neighbors) + '.h5'
+	n_neighbors = 0.8
+	pretrain = './saved_models/ddpg_tf_pretrain_weights_' + str(n) + '.h5'
+	train = './saved_models/ddpg_tf_final_weights_' + str(n) + '_' + str(n_neighbors) + '.h5'
 	env = PermutationSorting(n, transpositions=True)
 	state_transformer = OneHotStateTransformer(n)
 	actor_layer_sizes = [400, 300]
 	critic_layer_sizes = [400, 300]
 	agent = DDPGAgent(env, state_transformer, actor_layer_sizes, critic_layer_sizes, batch_size=32,
-					  train_start=60000, maxlen=1e6, neighbors_percent=n_neighbors, render=False,
-					  fill_mem=True, pretrain_path=pretrain, train_path=train)
+					  actor_learning_rate=0.0001, critic_learning_rate=0.001,
+					  train_start=16000, maxlen=20000, neighbors_percent=n_neighbors, render=False,
+					  pretrain_path=pretrain, train_path=train)
 	config = tf.ConfigProto()
 	config.gpu_options.allow_growth = True
 	with tf.Session(config=config) as sess:
 		agent.set_session(sess)
 		sess.run(tf.global_variables_initializer())
 		sess.run(agent.target_init)
-		agent.train(episodes=1000)
+		#agent.serial_pretrain()
+		agent.load_pretrain_weights()
+		agent.fill_memory(steps_total=16000, max_steps=300, epsilon=0.2)
+		agent.train(episodes=10000, max_steps=800)
 
 if __name__ == '__main__':
 	if len(sys.argv) != 2:
 		print("Missing Params")
 		sys.exit()
 	main(sys.argv)
+
+
+## Parameters used for n = 15
+	'''	
+	np.random.seed(12345678)
+	n = int(argv[1])
+	n_neighbors = 0.4
+	pretrain = './saved_models/ddpg_tf_pretrain_weights_' + str(n) + '.h5'
+	train = './saved_models/ddpg_tf_final_weights_' + str(n) + '_' + str(n_neighbors) + '.h5'
+	env = PermutationSorting(n, transpositions=True)
+	state_transformer = OneHotStateTransformer(n)
+	actor_layer_sizes = [400, 300]
+	critic_layer_sizes = [400, 300]
+	agent = DDPGAgent(env, state_transformer, actor_layer_sizes, critic_layer_sizes, batch_size=32,
+					  actor_learning_rate=0.0001, critic_learning_rate=0.001,
+					  train_start=16000, maxlen=20000, neighbors_percent=n_neighbors, render=False,
+					  pretrain_path=pretrain, train_path=train)
+	config = tf.ConfigProto()
+	config.gpu_options.allow_growth = True
+	with tf.Session(config=config) as sess:
+		agent.set_session(sess)
+		sess.run(tf.global_variables_initializer())
+		sess.run(agent.target_init)
+		#agent.serial_pretrain()
+		agent.load_pretrain_weights()
+		agent.fill_memory(steps_total=16000, max_steps=300, epsilon=0.2)
+		agent.train(episodes=10000, max_steps=800)
+					  '''

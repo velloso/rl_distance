@@ -142,12 +142,11 @@ class DDQNAgent:
 
 	def run_episode(self, max_steps, forced=None, update_eps=True, update_model=True):
 		done = False
-		score, loss = 0, 0
+		score, loss, steps = 0, 0, 0
 		state = self.env.reset(forced=forced)
 		if self._is_identity(state):
 			return 0, 0, 0
 		state = self.state_transformer.transform(state)
-		steps = 0
 		while not done and steps < max_steps:
 			if self.render:
 				self.env.render()
@@ -305,7 +304,7 @@ def main(argv):
 	env = PermutationSorting(n, transpositions=True)
 	state_transformer = OneHotStateTransformer(n)
 	hidden_layer_sizes = (400, 300)
-	agent = DDQNAgent(env, state_transformer, 0, hidden_layer_sizes=hidden_layer_sizes, batch_size=256, train_start=100000,
+	agent = DDQNAgent(env, state_transformer, 0, hidden_layer_sizes=hidden_layer_sizes, batch_size=256, train_start=60000,
 					  epsilon=0.7, fill_mem=True, render=False, pretrain_path=pretrain, train_path=train)
 	with tf.Session() as sess:
 		agent.set_session(sess)

@@ -8,10 +8,13 @@ import time
 from collections import deque
 
 import matplotlib.pyplot as plt
+import matplotlib as mpl
 import numpy as np
 
 EPS = 1e-7
 
+mpl.rcParams['font.size'] = 8
+mpl.rcParams['font.serif'] = "Times New Roman"
 
 class AtomicInteger:
 	def __init__(self):
@@ -38,15 +41,10 @@ class AtomicInteger:
 
 def get_running_avg(x, dist=100):
 	x = np.array(x)
-	n = len(x)-dist
+	n = len(x)
 	running_avg = np.empty(n)
 	for t in range(n):
-		b = t - dist
-		f = t + 1
-		if b < 0:
-			f -= b
-			b = 0
-		running_avg[t] = x[b:f].mean()
+		running_avg[t] = x[max(0, t - dist):(t + 1)].mean()
 	return running_avg
 
 
@@ -54,6 +52,27 @@ def plot_running_avg(x, title='Running Average'):
 	running_avg = get_running_avg(x)
 	plt.plot(running_avg)
 	plt.title(title)
+	plt.show()
+
+
+def plot_running_avgs_multiple():
+
+	l = [80, 100]
+	step = np.load("./train_data/ddqn_tf_100_steps.npy")
+	running_avg = get_running_avg(step)
+	plt.plot(get_running_avg(running_avg), label="DDQN")
+	for idx, n in enumerate([ 168, 210]):
+		step = np.load("./train_data/ddpg_enc_actions100_" + str(n) + "_steps.npy")
+		running_avg = get_running_avg(step)
+		plt.plot(get_running_avg(running_avg), label="WP "+str(l[idx])+"%")
+	plt.xlim((0, 5000))
+	plt.ylim((0, 50))
+	plt.xlabel('Episodes', fontsize=8)
+	plt.ylabel('Distance Average', fontsize=8)
+	plt.title('Distance comparison, permutation size n=10')
+	plt.legend()
+	file = 'saved_models/' + 'dist_10' + '.eps'
+	plt.savefig(file, format='eps', dpi=1000)
 	plt.show()
 
 
@@ -467,3 +486,6 @@ class OrnsteinUhlenbeckActionNoise:
 
 	def __repr__(self):
 		return 'OrnsteinUhlenbeckActionNoise(mu={}, sigma={})'.format(self.mu, self.sigma)
+
+if __name__ == '__main__':
+	plot_running_avgs_multiple()
