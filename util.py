@@ -5,7 +5,9 @@ import os
 import sys
 import threading
 import time
+import random
 from collections import deque
+import re
 
 import matplotlib.pyplot as plt
 import matplotlib as mpl
@@ -56,17 +58,14 @@ def plot_running_avg(x, title='Running Average'):
 
 
 def plot_running_avgs_multiple():
-
-	l = [80, 100]
 	step = np.load("./train_data/ddqn_tf_100_steps.npy")
 	running_avg = get_running_avg(step)
 	plt.plot(get_running_avg(running_avg), label="DDQN")
-	for idx, n in enumerate([ 168, 210]):
-		step = np.load("./train_data/ddpg_enc_actions100_" + str(n) + "_steps.npy")
-		running_avg = get_running_avg(step)
-		plt.plot(get_running_avg(running_avg), label="WP "+str(l[idx])+"%")
-	plt.xlim((0, 5000))
-	plt.ylim((0, 50))
+	step = np.load("./train_data/ddpg_enc_actions100_168_steps.npy")
+	running_avg = get_running_avg(step)
+	plt.plot(get_running_avg(running_avg), label="WP "+str(80)+"%")
+	plt.xlim((5000, 10000))
+	plt.ylim((0, 20))
 	plt.xlabel('Episodes', fontsize=8)
 	plt.ylabel('Distance Average', fontsize=8)
 	plt.title('Distance comparison, permutation size n=10')
@@ -113,6 +112,8 @@ def reverse_subarray(v, i, j):
 		i += 1
 		j -= 1
 
+def transpose_subarray(v, i, j, k):
+	return np.concatenate((v[:i], v[j + 1: k + 1], v[i:j + 1], v[k + 1:]))
 
 def count_breakpoints_reduced(v, i, j):
 	n = len(v)
@@ -242,16 +243,46 @@ def eps3(i):
 	return 1 * (0.9 ** i)
 
 
+# Taken from https://github.com/openai/baselines/blob/master/baselines/ddpg/noise.py, which is
+# based on http://math.stackexchange.com/questions/1287634/implementing-ornstein-uhlenbeck-in-matlab
+class OrnsteinUhlenbeckActionNoise:
+	def __init__(self, mu, sigma=0.3, theta=.15, dt=1e-2, x0=None):
+		self.theta = theta
+		self.mu = mu
+		self.sigma = sigma
+		self.dt = dt
+		self.x0 = x0
+		self.reset()
+
+	def __call__(self):
+		x = self.x_prev + self.theta * (self.mu - self.x_prev) * self.dt + \
+			self.sigma * np.sqrt(self.dt) * np.random.normal(size=self.mu.shape)
+		self.x_prev = x
+		return x
+
+	def reset(self):
+		self.x_prev = self.x0 if self.x0 is not None else np.zeros_like(self.mu)
+
+	def __repr__(self):
+		return 'OrnsteinUhlenbeckActionNoise(mu={}, sigma={})'.format(self.mu, self.sigma)
+
+
 class PermutationExactSolver:
-	def __init__(self, n):
+	def __init__(self, n, transpositions=False):
 		path = 'exact_%d' % n
+		if transpositions:
+			path = 'exact_trans_%d' % n
 		self._ans = from_file(path)
 		if self._ans is None:
+			print("Finding Exact Distance")
 			cur = np.arange(n)
 			self._ans = {self._to_string(cur): 0}
 			q = deque()
 			q.append(cur)
+			start = time.time()
 			while len(q) > 0:
+				if len(q) % 1000 == 0:
+					print("Dict size:", len(self._ans), "  Queue size:", len(q), "  time spent:", time.time() - start)
 				cur = q.popleft()
 				d = self._ans[self._to_string(cur)]
 				for i in range(n - 1):
@@ -262,6 +293,13 @@ class PermutationExactSolver:
 							self._ans[cur_str] = d + 1
 							q.append(cur.copy())
 						reverse_subarray(cur, i, j)
+						if transpositions:
+							for k in range(i, j):
+								trans = transpose_subarray(cur, i, k, j)
+								cur_str = self._to_string(trans)
+								if cur_str not in self._ans:
+									self._ans[cur_str] = d + 1
+									q.append(cur.copy())
 			ensure_saved_models_dir()
 			to_file(path, self._ans)
 
@@ -465,27 +503,156 @@ def plot_type5():
 	print('slower: %.2f' % slower_than_greedy)
 	print('avg: %.4f' % avg_ratio)
 
+def get_wp():
+	path_res = "./data/10_res/ddqn_exact"
+	path_bd = "./data/10_res/10_db"
+	path_ddqn = "./data/10_res/ddqn.dist"
+	path_exact = "./data/10_res/exact.dist"
+	with open(path_res, 'r') as fp, open(path_bd, 'w') as db, \
+			open(path_ddqn, 'w') as ddqn, open(path_exact, 'w') as exact:
+		line = fp.readline()
+		while line:
+			wp = re.search(r'(?<=DDQN: )\d+', line)
+			if wp is not None:
+				wp = int(wp.group())
+				ddqn.write(str(wp) + '\n')
+			wp = re.search(r'(?<=Exact: )\d+', line)
+			if wp is not None:
+				wp = int(wp.group())
+				exact.write(str(wp) + '\n')
+			wp = re.search(r'\[.*?\]', line)
+			if wp is not None:
+				wp = str(wp.group())
+				wp = wp[1:-1]
+				db.write(str(wp) + '\n')
+			line = fp.readline()
 
-class OrnsteinUhlenbeckActionNoise:
-	def __init__(self, mu, sigma=0.3, theta=.15, dt=1e-2, x0=None):
-		self.theta = theta
-		self.mu = mu
-		self.sigma = sigma
-		self.dt = dt
-		self.x0 = x0
-		self.reset()
+# Transforms distance from file to a numpy array
+def file_to_array(path):
+	with open(path, 'r') as fp:
+		line = fp.readline()
+		i=0
+		comp = []
+		while line:
+			p = np.fromstring(line, dtype=int, sep=' ')
+			if p.size != 0:
+				comp.append(p[1])
+			line = fp.readline()
+			i += 1
+		comp = np.array(comp)
+		np.save(path + "_numpy", comp)
 
-	def __call__(self):
-		x = self.x_prev + self.theta * (self.mu - self.x_prev) * self.dt + \
-			self.sigma * np.sqrt(self.dt) * np.random.normal(size=self.mu.shape)
-		self.x_prev = x
-		return x
+# Returns a random line in the file
+def random_line(afile):
+	line = next(afile)
+	for num, aline in enumerate(afile, 2):
+		if random.randrange(num): continue
+		line = aline
+	return line
 
-	def reset(self):
-		self.x_prev = self.x0 if self.x0 is not None else np.zeros_like(self.mu)
 
-	def __repr__(self):
-		return 'OrnsteinUhlenbeckActionNoise(mu={}, sigma={})'.format(self.mu, self.sigma)
+# Read the distance files and plot the comparison
+def plot_distance_curve_all(n):
+	rt = np.arange(1, n+1)
+	array_wp = np.zeros(n)
+	array_bp = np.zeros(n)
+	array_dod = np.zeros(n)
+	array_walter = np.zeros(n)
+	array_rahman = np.zeros(n)
+	k = 0
+	for j, revt in enumerate(rt):
+		path_wp = "./data/15_wp/wp-1k-r" + str(revt) + "-t" + str(revt) + ".dist"
+		path_bp = "./data/15_breakpoint/bp-r" + str(revt) + "-t" + str(revt) + ".dist"
+		path_dod = "./data/15_dod/dod2015-r" + str(revt) + "-t" + str(revt) + ".dist"
+		path_walter = "./data/15_walter/walter-r" + str(revt) + "-t" + str(revt) + ".dist"
+		path_rahman = "./data/15_rahman/rahman-r" + str(revt) + "-t" + str(revt) + ".dist"
+		with open(path_wp, 'r') as wp, open(path_bp, 'r') as bp, open(path_dod, 'r') as dod,\
+				open(path_walter, 'r') as walter, open(path_rahman, 'r') as rahman:
+			lwp = wp.readline()
+			lbp = bp.readline()
+			ldod = dod.readline()
+			lwalter = walter.readline()
+			lrahman = rahman.readline()
+			i, total_wp, total_bp, total_dod, total_walter, total_rahman = 0, 0, 0, 0, 0, 0
+			while lwp:
+				if int(lwp) != 100:
+					total_wp += int(lwp)
+					total_bp += int(lbp)
+					total_dod += int(ldod)
+					total_walter += int(lwalter)
+					total_rahman += int(lrahman)
+					i += 1
+				lwp = wp.readline()
+				lbp = bp.readline()
+				ldod = dod.readline()
+				lwalter = walter.readline()
+				lrahman = rahman.readline()
+			array_wp[j] = total_wp/i
+			array_bp[j] = total_bp/i
+			array_dod[j] = total_dod/i
+			array_walter[j] = total_walter/i
+			array_rahman[j] = total_rahman/i
+			k += i
+	x = np.arange(2, (2 * n) + 1, 2)
+	plt.plot(x, array_wp,  label="WP 80%")
+	plt.plot(x, array_walter, label="Walter")
+	plt.plot(x, array_rahman, label="Wahman")
+	plt.plot(x, array_dod, label="dod")
+	plt.plot(x, array_bp, label="Breakpoint")
+	plt.xticks(np.arange(min(x), max(x) + 1, 2))
+
+	#plt.xlim((0, 5000))
+	#plt.ylim((0, 50))
+	plt.xlabel('Number of Rearrangements Used', fontsize=8)
+	plt.ylabel('Distance Mean', fontsize=8)
+	plt.title('Distance comparison, permutation size n=15')
+	plt.legend()
+	file = 'saved_models/' + 'dist_rearrangement_15' + '.eps'
+	plt.savefig(file, format='eps', dpi=1000)
+	plt.show()
+
+
+# Read the distance files and plot the comparison
+def plot_10():
+	path_ddqn = "./data/10_res/ddqn.dist"
+	path_wp = "./data/10_res/wp.dist"
+	path_exact = "./data/10_res/exact.dist"
+	ddqn_array = []
+	wp_array = []
+	exact_array = []
+	with open(path_ddqn, 'r') as ddqn, open(path_wp, 'r') as wp, open(path_exact, 'r') as exact:
+		lddqn = ddqn.readline()
+		lwp = wp.readline()
+		lexact = exact.readline()
+		while lddqn and lexact:
+			ddqn_array.append(int(lddqn))
+			wp_array.append(int(lwp))
+			exact_array.append(int(lexact))
+			lddqn = ddqn.readline()
+			lwp = wp.readline()
+			lexact = exact.readline()
+
+	ddqn_array = np.array(ddqn_array)
+	wp_array = np.array(wp_array)
+	exact_array = np.array(exact_array)
+
+	running_avg = get_running_avg(ddqn_array, dist=300)
+	plt.plot(running_avg, label="DDQN")
+
+	running_avg = get_running_avg(wp_array, dist=300)
+	plt.plot(running_avg,  label="WP 80%")
+
+	running_avg = get_running_avg(exact_array, dist=300)
+	plt.plot(running_avg, label="Exact")
+
+	plt.xlabel('Permutations', fontsize=8)
+	plt.ylabel('Distance moving average', fontsize=8)
+	plt.title('Distance comparison, permutation size n=10')
+	plt.legend()
+	file = 'saved_models/' + 'dist_rearrangement_10' + '.eps'
+	plt.savefig(file, format='eps', dpi=1000)
+	plt.show()
+
 
 if __name__ == '__main__':
-	plot_running_avgs_multiple()
+	plot_10_2()

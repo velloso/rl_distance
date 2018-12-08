@@ -10,7 +10,7 @@ import tensorflow as tf
 
 from permutation_sorting import PermutationSorting
 from state_transformers import OneHotStateTransformer
-from util import v_upperbound_breakpoints, plot_running_avg, plot, greedy_reversal_sort, ensure_saved_models_dir
+from util import v_upperbound_breakpoints, plot_running_avg, plot, ensure_saved_models_dir
 
 # Double DQN Agent
 # it uses Neural Network to approximate q function
@@ -51,7 +51,8 @@ class DDQNAgent:
 			[self.t_network_params[i].assign(self.network_params[i]) for i in range(len(self.t_network_params))]
 
 		print("State size =", self.state_size, " Action size =", self.action_size)
-		
+
+	# The neural network model
 	def model (self, hidden_layer_sizes):
 		# inputs and targets
 		state = tf.placeholder(tf.float32, shape=(None, self.state_size), name='state')
@@ -81,12 +82,15 @@ class DDQNAgent:
 	def update_target_model(self):
 		self.session.run(self.update_target_network_params)
 
+	# Predict the action
 	def predict(self, states):
 		return self.session.run(self.predict_op, feed_dict={self.state: states})
-	
+
+	# Target predicts the action
 	def target_predict(self, states):
 		return self.session.run(self.t_predict_op, feed_dict={self.t_state: states})
 
+	# Updates the weights of the main network
 	def update(self, states, actions, targets):
 		cost, _ = self.session.run([self.cost, self.train_op], feed_dict={self.state: states, self.actions: actions, self.G: targets})
 		return np.mean(cost)
@@ -140,6 +144,7 @@ class DDQNAgent:
 				return False
 		return True
 
+	# Run one episode
 	def run_episode(self, max_steps, forced=None, update_eps=True, update_model=True):
 		done = False
 		score, loss, steps = 0, 0, 0
@@ -170,6 +175,7 @@ class DDQNAgent:
 		loss = loss/steps
 		return score, steps, loss
 
+	# Adds good data to the replay memory
 	def fill_memory(self, steps_total=None):
 		print("Filling queue memory with greedy actions.")
 
@@ -205,21 +211,17 @@ class DDQNAgent:
 
 			e += 1
 
+	# Train the agent
 	def train(self, episodes=1000, max_steps=800, plot_rewards=True):
 		scores, steps, losses = np.zeros(episodes), np.zeros(episodes), np.zeros(episodes)
 		start = time.time()
 		saver = tf.train.Saver()
-		break_flag = 0
 		if self.fill_mem:
 			self.fill_memory()
 		for e in range(episodes):
 			score, step, loss = self.run_episode(max_steps)
 			scores[e], steps[e], losses[e] = score, step, loss
 			print("Episode:", e, "  steps:", step, "  score: %.1f" % score,"  loss:", loss, "  epsilon:", self.epsilon, "  time:", time.time() - start)
-			if e%100 == 0 and break_flag==e:
-				self.fill_memory()
-			break_flag = break_flag+1 if step == max_steps else 0
-			#if break_flag > 1000 and e >= episodes/2: break
 			if math.isnan(loss): break
 		ensure_saved_models_dir()
 		saver.save(self.session, self.train_path)
@@ -234,26 +236,14 @@ class DDQNAgent:
 			plot_running_avg(steps)
 			plot_running_avg(losses, title="Losses")
 
-	def solve(self, permutation, its=100, max_steps=100, exploit_greedy_trace=False, update_eps=False,
-			  update_model=False):
+	# Solve a permutation
+	def solve(self, permutation, its=100, max_steps=100, update_eps=False, update_model=False):
 		ans = None
-		if exploit_greedy_trace:
-			trace = []
-			greedy_reversal_sort(permutation, trace)
 		for _ in range(its):
-			if exploit_greedy_trace:
-				last_ans = None
-				# noinspection PyUnboundLocalVariable
-				for p in trace[::-1]:
-					last_ans = self.run_episode(
-						max_steps=max_steps, forced=p, update_model=update_model, update_eps=update_eps)
-				if ans is None or last_ans > ans:
-					ans = last_ans
-			else:
-				score, steps, loss = self.run_episode(
-					max_steps=max_steps, forced=permutation, update_model=update_model, update_eps=update_eps)
-				if ans is None or steps > ans:
-					ans = steps
+			score, steps, loss = self.run_episode(
+				max_steps=max_steps, forced=permutation, update_model=update_model, update_eps=update_eps)
+			if ans is None or steps > ans:
+				ans = score
 		return -ans
 
 	# Get the score of some actions
@@ -261,6 +251,7 @@ class DDQNAgent:
 		for idx, (_, i, j, k) in enumerate(self.env.actions):
 			target[idx] = v_upperbound_breakpoints(state, i, j, k, self.discount_factor)
 
+	# Pre trains the agent
 	def serial_pretrain(self, rows=100000, batch_size=64, epochs=10):
 		start = time.time()
 		r = int(rows / batch_size)
@@ -304,24 +295,14 @@ def main(argv):
 	env = PermutationSorting(n, transpositions=True)
 	state_transformer = OneHotStateTransformer(n)
 	hidden_layer_sizes = (400, 300)
-	agent = DDQNAgent(env, state_transformer, 0, hidden_layer_sizes=hidden_layer_sizes, batch_size=256, train_start=60000,
+	agent = DDQNAgent(env, state_transformer, 0, hidden_layer_sizes=hidden_layer_sizes, batch_size=32, train_start=20000,
 					  epsilon=0.7, fill_mem=True, render=False, pretrain_path=pretrain, train_path=train)
 	with tf.Session() as sess:
 		agent.set_session(sess)
 		sess.run(tf.global_variables_initializer())
-		#agent.serial_pretrain()
+		agent.serial_pretrain()
 		#agent.load_pretrain_weights()
-		#agent.load_weights()
-		agent.train(episodes=5000)
-		'''
-		apt1 = 0
-		for _ in range(100):
-			p = np.random.permutation(n)
-			rl_ans = agent.solve(p)
-			ap1 = float(rl_ans)
-			apt1 = (apt1 + ap1) / 2
-			print(p, '-', 'RL:', rl_ans, ' Approx:', ap1)
-		print(apt1)'''
+		agent.train(episodes=10000)
 
 
 if __name__ == '__main__':

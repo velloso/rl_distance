@@ -8,6 +8,7 @@ REV_OP = 'rev'
 TRANS_OP = 'trans'
 
 
+# Representation of the permutation space
 class PermutationSpace(gym.Space):
 	def contains(self, x):
 		raise Exception('Env does not support contains call')
@@ -20,6 +21,7 @@ class PermutationSpace(gym.Space):
 		return np.random.permutation(self.n)
 
 
+# Environment representation of the genome rearrangement sorting
 class PermutationSorting(gym.Env):
 	def __init__(
 			self, n, reversals=True, transpositions=False):
@@ -49,6 +51,7 @@ class PermutationSorting(gym.Env):
 		self._reversals = reversals
 		self._transpositions = transpositions
 
+	# Reset the state
 	def reset(self, forced=None):
 		self._state = np.array(forced) if forced is not None else np.random.permutation(self._n)
 
@@ -59,9 +62,11 @@ class PermutationSorting(gym.Env):
 
 		return np.array(self._state)
 
+	# Set a flag to print the state
 	def render(self, mode='human'):
 		self._render = True
 
+	# Changes the state based on the action given
 	def step(self, action):
 		type_, i, j, k = self.actions[action]
 		state = self._state
