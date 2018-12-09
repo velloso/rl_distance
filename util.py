@@ -596,8 +596,8 @@ def plot_distance_curve_all(n):
 	x = np.arange(2, (2 * n) + 1, 2)
 	plt.plot(x, array_wp,  label="WP 80%")
 	plt.plot(x, array_walter, label="Walter")
-	plt.plot(x, array_rahman, label="Wahman")
-	plt.plot(x, array_dod, label="dod")
+	plt.plot(x, array_rahman, label="Rahman")
+	plt.plot(x, array_dod, label="DoD")
 	plt.plot(x, array_bp, label="Breakpoint")
 	plt.xticks(np.arange(min(x), max(x) + 1, 2))
 
@@ -655,4 +655,4 @@ def plot_10():
 
 
 if __name__ == '__main__':
-	plot_10_2()
+	plot_distance_curve_all(15)
